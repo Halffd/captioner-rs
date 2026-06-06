@@ -1,7 +1,7 @@
 use crossbeam_channel::Receiver;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 use rdev::{listen, Event, EventType, Key};
 pub use captioner_core::HotkeyEvent;
@@ -34,10 +34,8 @@ impl HotkeyListener {
     pub fn run(&self) {
         let tx = self.hotkey_tx.clone();
 
-        std::thread::spawn(move || {
-            info!("Global hotkey listener started");
-
-            let mut modifiers = Modifiers::default();
+    std::thread::spawn(move || {
+        let mut modifiers = Modifiers::default();
 
             let callback = move |event: Event| {
                 match event.event_type {

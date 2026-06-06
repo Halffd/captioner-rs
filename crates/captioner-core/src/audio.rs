@@ -1,7 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::error::CaptionerError;
 
@@ -13,6 +13,17 @@ pub struct AudioCapture {
     stop_flag: Arc<AtomicBool>,
     recording_enabled: Arc<AtomicBool>,
     buffer: Arc<parking_lot::Mutex<Vec<f32>>>,
+}
+
+pub struct OutputCapture {
+    device_name: String,
+    stream: Option<cpal::Stream>,
+    buffer: Arc<parking_lot::Mutex<Vec<f32>>>,
+}
+
+pub struct DualCapture {
+    pub input: AudioCapture,
+    pub output: Option<OutputCapture>,
 }
 
 impl AudioCapture {
@@ -60,6 +71,10 @@ impl AudioCapture {
                 CaptionerError::AudioDevice(format!("Device '{}' not found", self.device_name))
             })?;
 
+        self.start_on_device(&device)
+    }
+
+    fn start_on_device(&mut self, device: &cpal::Device) -> Result<(), CaptionerError> {
         let config = device
             .default_input_config()
             .map_err(|e| CaptionerError::AudioCapture(e.to_string()))?;
@@ -195,9 +210,169 @@ impl AudioCapture {
     pub fn sample_rate(&self) -> u32 {
         TARGET_SAMPLE_RATE
     }
+
+    pub fn buffer_ptr(&self) -> Arc<parking_lot::Mutex<Vec<f32>>> {
+        self.buffer.clone()
+    }
+}
+
+impl OutputCapture {
+    pub fn new(device_spec: &str) -> Result<Self, CaptionerError> {
+        let host = cpal::default_host();
+
+        let device = if let Ok(idx) = device_spec.parse::<usize>() {
+            host.output_devices()
+                .map_err(|e| CaptionerError::AudioDevice(e.to_string()))?
+                .nth(idx)
+        } else {
+            host.output_devices()
+                .map_err(|e| CaptionerError::AudioDevice(e.to_string()))?
+                .find(|d| d.name().map(|n| n.contains(device_spec)).unwrap_or(false))
+        };
+
+        let device = device.ok_or_else(|| {
+            CaptionerError::AudioDevice(format!("Output device '{}' not found", device_spec))
+        })?;
+
+        let device_name = device
+            .name()
+            .map_err(|e| CaptionerError::AudioDevice(e.to_string()))?;
+
+        Ok(Self {
+            device_name,
+            stream: None,
+            buffer: Arc::new(parking_lot::Mutex::new(Vec::with_capacity(16000))),
+        })
+    }
+
+    pub fn start(&mut self) -> Result<(), CaptionerError> {
+        let host = cpal::default_host();
+        let device = host
+            .output_devices()
+            .map_err(|e| CaptionerError::AudioDevice(e.to_string()))?
+            .find(|d| d.name().map(|n| n == self.device_name).unwrap_or(false))
+            .ok_or_else(|| {
+                CaptionerError::AudioDevice(format!("Output device '{}' not found", self.device_name))
+            })?;
+
+        let config = device
+            .default_output_config()
+            .map_err(|e| CaptionerError::AudioCapture(e.to_string()))?;
+
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels();
+
+        let buffer = self.buffer.clone();
+        let resample_needed = sample_rate != TARGET_SAMPLE_RATE;
+
+        let err_fn = |err: cpal::StreamError| {
+            error!("Output capture stream error: {}", err);
+        };
+
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    let mono = mono_f32(data, channels);
+                    let resampled = if resample_needed {
+                        linear_resample(&mono, sample_rate, TARGET_SAMPLE_RATE)
+                    } else {
+                        mono
+                    };
+                    buffer.lock().extend_from_slice(&resampled);
+                },
+                err_fn,
+                None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    let mono = mono_i16_to_f32(data, channels);
+                    let resampled = if resample_needed {
+                        linear_resample(&mono, sample_rate, TARGET_SAMPLE_RATE)
+                    } else {
+                        mono
+                    };
+                    buffer.lock().extend_from_slice(&resampled);
+                },
+                err_fn,
+                None,
+            ),
+            cpal::SampleFormat::U16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[u16], _: &cpal::InputCallbackInfo| {
+                    let mono = mono_u16_to_f32(data, channels);
+                    let resampled = if resample_needed {
+                        linear_resample(&mono, sample_rate, TARGET_SAMPLE_RATE)
+                    } else {
+                        mono
+                    };
+                    buffer.lock().extend_from_slice(&resampled);
+                },
+                err_fn,
+                None,
+            ),
+            format => {
+                return Err(CaptionerError::AudioCapture(format!(
+                    "Unsupported sample format: {:?}",
+                    format
+                )));
+            }
+        };
+
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Cannot open output device '{}' as input (loopback not supported): {}", self.device_name, e);
+                warn!("Monitor capture requires PulseAudio loopback or ALSA snd-aloop module");
+                return Err(CaptionerError::AudioCapture(format!(
+                    "Cannot capture from output device '{}': {}. Install PulseAudio loopback or ALSA snd-aloop.",
+                    self.device_name, e
+                )));
+            }
+        };
+
+        stream.play().map_err(|e| CaptionerError::AudioCapture(e.to_string()))?;
+        self.stream = Some(stream);
+
+        info!(
+            "Output capture started: {} ({}Hz → {}Hz, {}ch → mono)",
+            self.device_name, sample_rate, TARGET_SAMPLE_RATE, channels
+        );
+
+        Ok(())
+    }
+
+    pub fn stop(&mut self) {
+        self.stream.take();
+    }
+
+    pub fn device_name(&self) -> &str {
+        &self.device_name
+    }
+
+    pub fn has_samples(&self) -> bool {
+        !self.buffer.lock().is_empty()
+    }
+
+    pub fn pull_samples(&self, max_samples: usize) -> Vec<f32> {
+        let mut buf = self.buffer.lock();
+        let drain_count = buf.len().min(max_samples);
+        buf.drain(0..drain_count).collect()
+    }
+
+    pub fn buffer_ptr(&self) -> Arc<parking_lot::Mutex<Vec<f32>>> {
+        self.buffer.clone()
+    }
 }
 
 impl Drop for AudioCapture {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl Drop for OutputCapture {
     fn drop(&mut self) {
         self.stop();
     }
@@ -284,6 +459,6 @@ pub fn print_audio_devices() {
         }
     }
     println!("\n=== Hints ===");
-    println!(" -i, --input <name or index> Select input device (microphone)");
-    println!(" -o, --output <name or index> Select output device for monitor capture");
+    println!(" -i, --input <name or index>   Select input device (microphone)");
+    println!(" -o, --output <name or index>  Select output device for monitor capture (requires loopback)");
 }

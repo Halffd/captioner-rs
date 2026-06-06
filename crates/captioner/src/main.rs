@@ -7,7 +7,7 @@ use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use captioner_core::{
-    audio::AudioCapture,
+    audio::{AudioCapture, OutputCapture},
     config::parse_args,
     stt::SttEngine,
     AppCommand, TranscriptionBackend, TranscriptionResult,
@@ -78,6 +78,7 @@ fn main() -> anyhow::Result<()> {
             let audio_stop = stop_flag.clone();
             let audio_tx_clone = audio_tx.clone();
             let audio_input = config.input_device.clone();
+            let audio_output = config.output_device.clone();
             let rec_flag = audio_recording_flag.clone();
 
             thread::spawn(move || {
@@ -96,18 +97,60 @@ fn main() -> anyhow::Result<()> {
 
                 info!("Audio capture started on device: {}", capture.device_name());
 
-                while !audio_stop.load(Ordering::SeqCst) {
-                    thread::sleep(std::time::Duration::from_millis(10));
-
-                    if capture.has_samples() {
-                        let samples = capture.pull_samples(1600);
-                        let recording = rec_flag.load(Ordering::SeqCst);
-                        if !samples.is_empty() && recording && audio_tx_clone.blocking_send(samples).is_err() {
-                            break;
+                let mut output_capture: Option<OutputCapture> = None;
+                if let Some(ref output_spec) = audio_output {
+                    match OutputCapture::new(output_spec) {
+                        Ok(mut oc) => {
+                            match oc.start() {
+                                Ok(()) => {
+                                    info!("Output monitor capture started on device: {}", oc.device_name());
+                                    output_capture = Some(oc);
+                                }
+                                Err(e) => {
+                                    error!("Failed to start output capture: {}", e);
+                                    info!("Continuing with microphone input only");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to open output device: {}", e);
+                            info!("Continuing with microphone input only");
                         }
                     }
                 }
 
+                while !audio_stop.load(Ordering::SeqCst) {
+                    thread::sleep(std::time::Duration::from_millis(10));
+
+                    let recording = rec_flag.load(Ordering::SeqCst);
+                    if !recording {
+                        continue;
+                    }
+
+                    if capture.has_samples() {
+                        let mut samples = capture.pull_samples(1600);
+                        if let Some(ref mut oc) = output_capture {
+                            if oc.has_samples() {
+                                let out_samples = oc.pull_samples(1600);
+                                merge_audio(&mut samples, &out_samples);
+                            }
+                        }
+                        if !samples.is_empty() && audio_tx_clone.blocking_send(samples).is_err() {
+                            break;
+                        }
+                    } else if let Some(ref mut oc) = output_capture {
+                        if oc.has_samples() {
+                            let out_samples = oc.pull_samples(1600);
+                            if !out_samples.is_empty() && audio_tx_clone.blocking_send(out_samples).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(mut oc) = output_capture {
+                    oc.stop();
+                }
                 capture.stop();
                 info!("Audio capture thread stopped");
             });
@@ -397,5 +440,12 @@ async fn run_command_loop(
         if stop_flag.load(Ordering::SeqCst) {
             return;
         }
+    }
+}
+
+fn merge_audio(primary: &mut [f32], secondary: &[f32]) {
+    let len = primary.len().min(secondary.len());
+    for i in 0..len {
+        primary[i] = (primary[i] + secondary[i]) * 0.5;
     }
 }
