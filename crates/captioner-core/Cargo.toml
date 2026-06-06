@@ -1,0 +1,27 @@
+[package]
+name = "captioner-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+cpal = { workspace = true }
+whisper-rs = { workspace = true }
+webrtc-vad = { workspace = true }
+hound = { workspace = true }
+rubato = { workspace = true }
+crossbeam-channel = { workspace = true }
+lindera = { workspace = true }
+once_cell = "1"
+parking_lot = "0.12"
+directories = { workspace = true }
+toml = { workspace = true }
