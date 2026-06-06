@@ -1,0 +1,15 @@
+[package]
+name = "captioner-log"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+captioner-core = { path = "../captioner-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = "0.12"
