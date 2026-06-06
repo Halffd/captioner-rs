@@ -1,0 +1,19 @@
+[package]
+name = "captioner-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+eframe = { workspace = true }
+egui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = "0.12"
+crossbeam-channel = { workspace = true }
+tokio = { workspace = true }
+
+captioner-core = { path = "../captioner-core" }
