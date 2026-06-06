@@ -317,12 +317,13 @@ impl App for CaptionerGUI {
         self.hovered_toolbar = self.show_toolbar;
 
         Area::new(egui::Id::new("captioner_overlay"))
-            .fixed_pos(frame_rect.min)
-            .order(Order::Foreground)
-            .show(ctx, |ui| {
-                Frame::none()
-                    .fill(Color32::from_rgba_unmultiplied(0, 0, 0, self.alpha))
-                    .show(ui, |ui| {
+        .fixed_pos(frame_rect.min)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            let bg_alpha = self.alpha.max(40);
+            Frame::none()
+            .fill(Color32::from_rgba_unmultiplied(0, 0, 0, bg_alpha))
+            .show(ui, |ui| {
                         ui.set_min_size(frame_rect.size());
 
                         if self.show_toolbar {
@@ -520,10 +521,8 @@ impl CaptionerGUI {
         let viewport = egui::ViewportBuilder::default()
             .with_decorations(false)
             .with_always_on_top()
-            .with_transparent(true)
             .with_inner_size(Vec2::new(1200.0, 210.0))
-            .with_resizable(true)
-            .with_icon(eframe::icon_data::from_png_bytes(&[]).unwrap_or_default());
+            .with_resizable(true);
 
         let options = NativeOptions {
             viewport,
