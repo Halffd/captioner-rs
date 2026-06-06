@@ -1,0 +1,26 @@
+[package]
+name = "captioner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "captioner"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+parking_lot = "0.12"
+crossbeam-channel = { workspace = true }
+
+captioner-core = { path = "../captioner-core" }
+captioner-log = { path = "../captioner-log" }
+captioner-input = { path = "../captioner-input" }
+captioner-web = { path = "../captioner-web" }
+captioner-gui = { path = "../captioner-gui" }
+captioner-python = { path = "../captioner-python" }
