@@ -25,3 +25,5 @@ once_cell = "1"
 parking_lot = "0.12"
 directories = { workspace = true }
 toml = { workspace = true }
+reqwest = { workspace = true }
+futures-util = { workspace = true }

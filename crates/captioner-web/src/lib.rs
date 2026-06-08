@@ -19,7 +19,7 @@ use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tracing::{error, info};
 
-use captioner_core::AppCommand;
+use captioner_core::{AppCommand, ModelDownloader, DownloadStatus, ModelInfo};
 
 #[derive(Clone)]
 struct WebState {
@@ -29,6 +29,7 @@ struct WebState {
     recording: Arc<Mutex<bool>>,
     current_model: Arc<Mutex<String>>,
     current_language: Arc<Mutex<Option<String>>>,
+    model_downloader: Arc<ModelDownloader>,
 }
 
 #[derive(Serialize)]
@@ -57,6 +58,11 @@ struct SetLanguageRequest {
 #[derive(Deserialize)]
 struct SetRecordingScaleRequest {
     scale: f32,
+}
+
+#[derive(Deserialize)]
+struct DownloadModelRequest {
+    model: String,
 }
 
 async fn get_transcript(State(state): State<WebState>) -> Json<TranscriptResponse> {
@@ -155,12 +161,49 @@ async fn set_language(
     StatusCode::OK
 }
 
-async fn set_recording_scale(
+    async fn set_recording_scale(
     State(state): State<WebState>,
     Json(body): Json<SetRecordingScaleRequest>,
-) -> StatusCode {
+    ) -> StatusCode {
     let _ = state.command_tx.send(AppCommand::SetRecordingScale(body.scale));
     StatusCode::OK
+    }
+
+async fn list_models(State(_state): State<WebState>) -> Json<Vec<ModelInfo>> {
+    Json(captioner_core::download::list_models_json())
+}
+
+async fn download_model(
+    State(state): State<WebState>,
+    Json(body): Json<DownloadModelRequest>,
+) -> StatusCode {
+    let _ = state.command_tx.send(AppCommand::DownloadModel(body.model.clone()));
+    StatusCode::OK
+}
+
+async fn download_status(State(state): State<WebState>) -> Json<serde_json::Value> {
+    let status = state.model_downloader.status();
+    let val = match &status {
+        DownloadStatus::Idle => serde_json::json!({"status": "idle"}),
+        DownloadStatus::Downloading { model, downloaded, total } => serde_json::json!({
+            "status": "downloading",
+            "model": model,
+            "downloaded": downloaded,
+            "total": total,
+            "percent": if *total > 0 { (*downloaded as f64 / *total as f64 * 100.0) as i32 } else { 0 },
+        }),
+        DownloadStatus::Completed { model, path } => serde_json::json!({
+            "status": "completed",
+            "model": model,
+            "path": path.to_string_lossy(),
+        }),
+        DownloadStatus::Failed { model, error } => serde_json::json!({
+            "status": "failed",
+            "model": model,
+            "error": error,
+        }),
+    };
+    Json(val)
 }
 
 async fn quit(State(state): State<WebState>) -> StatusCode {
@@ -249,6 +292,7 @@ pub fn create_app(
     recording: Arc<Mutex<bool>>,
     current_model: Arc<Mutex<String>>,
     current_language: Arc<Mutex<Option<String>>>,
+    model_downloader: Arc<ModelDownloader>,
 ) -> Router {
     let state = WebState {
         transcript,
@@ -257,6 +301,7 @@ pub fn create_app(
         recording,
         current_model,
         current_language,
+        model_downloader,
     };
 
     Router::new()
@@ -270,6 +315,9 @@ pub fn create_app(
         .route("/model", post(set_model))
         .route("/language", post(set_language))
         .route("/recording-scale", post(set_recording_scale))
+        .route("/models", get(list_models))
+        .route("/models/download", post(download_model))
+        .route("/models/download-status", get(download_status))
         .route("/quit", post(quit))
         .with_state(state)
 }
@@ -286,6 +334,7 @@ pub struct WebConfig {
     pub recording: Arc<Mutex<bool>>,
     pub current_model: Arc<Mutex<String>>,
     pub current_language: Arc<Mutex<Option<String>>>,
+    pub model_downloader: Arc<ModelDownloader>,
 }
 
 pub async fn start_server(cfg: WebConfig) {
@@ -296,6 +345,7 @@ pub async fn start_server(cfg: WebConfig) {
         cfg.recording,
         cfg.current_model,
         cfg.current_language,
+        cfg.model_downloader,
     );
 
     let addr = format!("0.0.0.0:{}", cfg.port);
@@ -339,6 +389,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .toolbar label{font-size:13px;color:#aaa;margin-right:4px}
 .toolbar select,.toolbar input{background:#2a2a4a;color:#fff;border:1px solid #0f3460;border-radius:4px;padding:4px 8px;font-size:13px}
 .toolbar input{width:70px}
+.model-panel{display:none;padding:8px 20px;background:#16213e60;border-top:1px solid #0f3460}
+.model-panel.open{display:block}
+.model-row{display:flex;align-items:center;gap:10px;padding:4px 0;font-size:13px}
+.model-row .name{min-width:100px;color:#ccc}
+.model-row .size{color:#888;min-width:80px}
+.model-row .btn-dl{background:#2d4a6a;border:none;color:#fff;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:12px}
+.model-row .btn-dl:hover{background:#3d5a7a}
+.model-row .btn-dl:disabled{opacity:.5;cursor:default}
+.model-row .status{font-size:12px}
+.model-row .status.ok{color:#4caf50}
+.model-row .status.progress{color:#ffc107}
+.model-row .status.err{color:#f44336}
+.progress-bar{width:100px;height:8px;background:#2a2a4a;border-radius:4px;overflow:hidden}
+.progress-bar .fill{height:100%;background:#4caf50;transition:width .3s}
 #transcript{flex:1;background:rgba(0,0,0,.3);border-radius:0;padding:20px;font-size:24px;line-height:1.6;white-space:pre-wrap;overflow-y:auto}
 .conn-status{font-size:12px;padding:2px 8px;border-radius:4px;margin-left:8px}
 .conn-status.connected{background:#2d5a2d;color:#8f8}
@@ -376,10 +440,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <option value="small.en">small.en</option>
     <option value="medium.en">medium.en</option>
   </select>
-  <label>Language:</label>
-  <input id="langInput" type="text" placeholder="e.g. en, ja" onchange="setLanguage(this.value)">
-</div>
-<div id="transcript"></div>
+        <label>Language:</label>
+        <input id="langInput" type="text" placeholder="e.g. en, ja" onchange="setLanguage(this.value)">
+        <button class="btn" onclick="toggleModels()" style="font-size:13px;padding:4px 10px">Models</button>
+    </div>
+    <div id="modelPanel" class="model-panel">
+        <div id="modelList"></div>
+    </div>
+    <div id="transcript"></div>
 <script>
 const transcript = document.getElementById('transcript');
 const btnRec = document.getElementById('btnRec');
@@ -523,11 +591,70 @@ function setLanguage(l) {
 }
 
 function quit() {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send('quit');
-  } else {
-    fetch('/quit', {method:'POST'});
-  }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send('quit');
+    } else {
+        fetch('/quit', {method:'POST'});
+    }
+}
+
+function toggleModels() {
+    const p = document.getElementById('modelPanel');
+    if (p.classList.contains('open')) {
+        p.classList.remove('open');
+    } else {
+        p.classList.add('open');
+        loadModels();
+    }
+}
+
+async function loadModels() {
+    try {
+        const res = await fetch('/models');
+        const models = await res.json();
+        const dlRes = await fetch('/models/download-status');
+        const dlStatus = await dlRes.json();
+        let html = '';
+        for (const m of models) {
+            const downloading = dlStatus.status === 'downloading' && dlStatus.model === m.name;
+            const pct = downloading ? dlStatus.percent : 0;
+            let statusHtml = '';
+            let btnHtml = '';
+            if (m.downloaded) {
+                statusHtml = '<span class="status ok">✓ downloaded</span>';
+            } else if (downloading) {
+                statusHtml = '<span class="status progress">' + pct + '%</span><div class="progress-bar"><div class="fill" style="width:' + pct + '%"></div></div>';
+                btnHtml = '<button class="btn-dl" disabled>Downloading...</button>';
+            } else if (dlStatus.status === 'downloading') {
+                statusHtml = '<span class="status" style="color:#888">queued</span>';
+                btnHtml = '<button class="btn-dl" disabled>Download</button>';
+            } else {
+                btnHtml = '<button class="btn-dl" onclick="downloadModel(\'' + m.name + '\')">Download</button>';
+            }
+            if (dlStatus.status === 'failed' && dlStatus.model === m.name) {
+                statusHtml = '<span class="status err">Error: ' + (dlStatus.error||'unknown') + '</span>';
+                btnHtml = '<button class="btn-dl" onclick="downloadModel(\'' + m.name + '\')">Retry</button>';
+            }
+            html += '<div class="model-row"><span class="name">' + m.name + '</span><span class="size">' + m.estimated_size + '</span>' + statusHtml + btnHtml + '</div>';
+        }
+        document.getElementById('modelList').innerHTML = html;
+    } catch(e) {
+        document.getElementById('modelList').innerHTML = '<span style="color:#f88">Failed to load models</span>';
+    }
+}
+
+async function downloadModel(name) {
+    await fetch('/models/download', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model:name})});
+    pollDownloadStatus();
+}
+
+async function pollDownloadStatus() {
+    const res = await fetch('/models/download-status');
+    const s = await res.json();
+    loadModels();
+    if (s.status === 'downloading') {
+        setTimeout(pollDownloadStatus, 1000);
+    }
 }
 
 loadTranscript();

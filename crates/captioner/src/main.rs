@@ -10,6 +10,7 @@ use captioner_core::{
     audio::{AudioCapture, OutputCapture},
     config::parse_args,
     stt::SttEngine,
+    download::ModelDownloader,
     AppCommand, TranscriptionBackend, TranscriptionResult,
 };
 use captioner_input::HotkeyListener;
@@ -72,6 +73,7 @@ fn main() -> anyhow::Result<()> {
     info!("Log directory: {}/Logs", config.path.display());
 
     let audio_recording_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+    let model_downloader = Arc::new(ModelDownloader::new());
 
     spawn_audio_capture(
         &config,
@@ -97,6 +99,7 @@ fn main() -> anyhow::Result<()> {
         &transcription_tx,
         &command_tx,
         &web_event_tx,
+        &model_downloader,
     );
 
     spawn_log_writer(
@@ -113,6 +116,7 @@ fn main() -> anyhow::Result<()> {
         &audio_recording_flag,
         &shared_log,
         &web_event_tx,
+        &model_downloader,
         audio_rx,
     );
 
@@ -126,13 +130,14 @@ fn main() -> anyhow::Result<()> {
             .map(|(_, rx)| rx.clone())
             .unwrap_or_else(|| crossbeam_channel::bounded(1).1);
 
-        if let Err(e) = CaptionerGUI::run(
-            gui_stop,
-            gui_command_tx,
-            gui_transcription_rx,
-            hotkey_rx,
-            language,
-        ) {
+    if let Err(e) = CaptionerGUI::run(
+        gui_stop,
+        gui_command_tx,
+        gui_transcription_rx,
+        hotkey_rx,
+        language,
+        model_downloader.clone(),
+    ) {
             error!("GUI error: {}", e);
         }
     } else {
@@ -249,6 +254,7 @@ fn spawn_web_server(
     transcription_tx: &broadcast::Sender<TranscriptionResult>,
     command_tx: &broadcast::Sender<AppCommand>,
     web_event_tx: &broadcast::Sender<String>,
+    model_downloader: &Arc<ModelDownloader>,
 ) {
     if !config.web {
         return;
@@ -261,6 +267,7 @@ fn spawn_web_server(
     let web_recording = Arc::new(parking_lot::Mutex::new(true));
     let web_model = Arc::new(parking_lot::Mutex::new(config.model_name.clone()));
     let web_lang = Arc::new(parking_lot::Mutex::new(config.language.clone()));
+    let web_dl = model_downloader.clone();
     let web_port = config.web_port;
 
     std::thread::spawn(move || {
@@ -285,15 +292,16 @@ fn spawn_web_server(
             }
         });
 
-        let cfg = WebConfig {
-            port: web_port,
-            transcript: web_transcript,
-            event_tx: web_tx,
-            command_tx: web_command_tx,
-            recording: web_recording,
-            current_model: web_model,
-            current_language: web_lang,
-        };
+    let cfg = WebConfig {
+        port: web_port,
+        transcript: web_transcript,
+        event_tx: web_tx,
+        command_tx: web_command_tx,
+        recording: web_recording,
+        current_model: web_model,
+        current_language: web_lang,
+        model_downloader: web_dl,
+    };
 
         rt.block_on(start_server(cfg));
     });
@@ -342,6 +350,7 @@ fn spawn_command_handler(
     audio_recording_flag: &Arc<AtomicBool>,
     shared_log: &Arc<SharedLog>,
     web_event_tx: &broadcast::Sender<String>,
+    model_downloader: &Arc<ModelDownloader>,
     audio_rx: mpsc::Receiver<Vec<f32>>,
 ) {
     match config.transcription_backend {
@@ -361,8 +370,9 @@ fn spawn_command_handler(
             let mut command_rx = command_tx.subscribe();
             let sf = stop_flag.clone();
             let arf = audio_recording_flag.clone();
-            let sl = shared_log.clone();
-            let wetx = web_event_tx.clone();
+        let sl = shared_log.clone();
+        let wetx = web_event_tx.clone();
+        let dl = model_downloader.clone();
 
         let engine_stopped = Arc::new(AtomicBool::new(false));
 
@@ -412,10 +422,14 @@ fn spawn_command_handler(
                                     Err(e) => error!("Failed to send language change request: {}", e),
                                 }
                             }
-                            AppCommand::SetRecordingScale(s) => {
-                                info!("Recording scale change requested: {} (not yet implemented)", s);
-                            }
-                            _ => {}
+                AppCommand::SetRecordingScale(s) => {
+                    info!("Recording scale change requested: {} (not yet implemented)", s);
+                }
+                AppCommand::DownloadModel(m) => {
+                    info!("Model download requested: {}", m);
+                    dl.download(&m);
+                }
+                _ => {}
                         }
                     }
                     if sf.load(Ordering::SeqCst) || es.load(Ordering::SeqCst) {
@@ -446,6 +460,7 @@ fn spawn_command_handler(
         let py_shared_log = shared_log.clone();
         let py_command_tx = command_tx.clone();
         let py_web_event_tx = web_event_tx.clone();
+        let py_dl = model_downloader.clone();
 
         std::thread::spawn(move || {
             let mut cmd_rx = py_command_tx.subscribe();
@@ -476,17 +491,21 @@ fn spawn_command_handler(
                                     AppCommand::SetModel(m) => {
                                         info!("Model change requested: {} (restart required for Python backend)", m);
                                     }
-                                    AppCommand::SetLanguage(l) => {
-                                        info!("Language change requested: {:?} (restart required for Python backend)", l);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if s.load(Ordering::SeqCst) {
-                                return;
-                            }
-                        }
-                    });
+                AppCommand::SetLanguage(l) => {
+                    info!("Language change requested: {:?} (restart required for Python backend)", l);
+                }
+                AppCommand::DownloadModel(m) => {
+                    info!("Model download requested: {}", m);
+                    py_dl.download(&m);
+                }
+                _ => {}
+            }
+        }
+        if s.load(Ordering::SeqCst) {
+            return;
+        }
+    }
+});
 
                     py_engine.run().await;
                 });
@@ -502,6 +521,7 @@ fn spawn_command_handler(
         let arf = audio_recording_flag.clone();
         let sl = shared_log.clone();
         let wetx = web_event_tx.clone();
+        let dl = model_downloader.clone();
         let stub_command_tx = command_tx.clone();
 
         std::thread::spawn(move || {
@@ -524,11 +544,15 @@ fn spawn_command_handler(
                                     arf.store(!now, Ordering::SeqCst);
                                     info!("Recording: {}", !now);
                                 }
-                                AppCommand::Clear => {
-                                    sl.write_log("-- Clear --");
-                                    let _ = wetx.send("CLEAR".to_string());
-                                }
-                                _ => {}
+                AppCommand::Clear => {
+                    sl.write_log("-- Clear --");
+                    let _ = wetx.send("CLEAR".to_string());
+                }
+                AppCommand::DownloadModel(m) => {
+                    info!("Model download requested: {}", m);
+                    dl.download(&m);
+                }
+                _ => {}
                             }
                         }
                     }

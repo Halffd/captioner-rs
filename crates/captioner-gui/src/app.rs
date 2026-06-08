@@ -11,6 +11,7 @@ use tracing::debug;
 
 use captioner_core::{
     AppCommand, HotkeyEvent, TranscriptionResult,
+    ModelDownloader, DownloadStatus,
 };
 
 pub struct DuplicateDetector;
@@ -61,6 +62,7 @@ pub struct CaptionerGUI {
     model_index: usize,
     show_toolbar: bool,
     hovered_toolbar: bool,
+    model_downloader: Arc<ModelDownloader>,
 }
 
 impl CaptionerGUI {
@@ -70,6 +72,7 @@ impl CaptionerGUI {
         transcription_rx: tokio::sync::broadcast::Receiver<TranscriptionResult>,
         hotkey_rx: Receiver<HotkeyEvent>,
         language: Option<String>,
+        model_downloader: Arc<ModelDownloader>,
     ) -> Self {
         Self {
             lines: Vec::new(),
@@ -97,6 +100,7 @@ impl CaptionerGUI {
             model_index: 1,
             show_toolbar: false,
             hovered_toolbar: false,
+            model_downloader,
         }
     }
 
@@ -478,12 +482,57 @@ impl CaptionerGUI {
                             row_ui.text_edit_singleline(&mut lang_input);
                         });
 
-                        ui.horizontal(|row_ui| {
-                            row_ui.label("Font Size:");
-                            row_ui.add(DragValue::new(&mut font_size).range(10.0..=200.0).speed(1.0));
-                        });
+        ui.horizontal(|row_ui| {
+            row_ui.label("Font Size:");
+            row_ui.add(DragValue::new(&mut font_size).range(10.0..=200.0).speed(1.0));
+        });
 
-                        ui.separator();
+        ui.separator();
+        ui.heading("Models");
+        ScrollArea::vertical().max_height(150.0).show(ui, |scroll_ui| {
+            let models = captioner_core::download::downloadable_models();
+            for (name, size_label) in models {
+                scroll_ui.horizontal(|row_ui| {
+                    let downloaded = captioner_core::download::is_model_downloaded(name);
+                    let status = self.model_downloader.status();
+
+                    let is_downloading = matches!(
+                        status,
+                        DownloadStatus::Downloading { .. }
+                    );
+                    let this_downloading = matches!(
+                        &status,
+                        DownloadStatus::Downloading { model: ref m, .. } if m == name
+                    );
+
+                    row_ui.label(*name);
+                    row_ui.label(format!("({})", size_label));
+
+                    if downloaded {
+                        row_ui.label(RichText::new("✓").color(Color32::GREEN));
+                    } else if this_downloading {
+                        if let DownloadStatus::Downloading { downloaded, total, .. } = &status {
+                            let pct = if *total > 0 { (*downloaded as f64 / *total as f64 * 100.0) as i32 } else { 0 };
+                            row_ui.label(RichText::new(format!("{}%", pct)).color(Color32::YELLOW));
+                        }
+                    } else if is_downloading {
+                        row_ui.label(RichText::new("...").color(Color32::GRAY));
+                    } else {
+                        if row_ui.button("Download").clicked() {
+                            let _ = self.command_tx.send(AppCommand::DownloadModel(name.to_string()));
+                        }
+                    }
+
+                    if matches!(status, DownloadStatus::Failed { model: ref m, .. } if m == name) {
+                        if let DownloadStatus::Failed { error, .. } = &status {
+                            row_ui.label(RichText::new(format!("Error: {}", error)).color(Color32::RED));
+                        }
+                    }
+                });
+            }
+        });
+
+        ui.separator();
 
                         ui.horizontal(|btn_ui| {
                             if btn_ui.button("OK").clicked() {
@@ -517,6 +566,7 @@ impl CaptionerGUI {
         transcription_rx: tokio::sync::broadcast::Receiver<TranscriptionResult>,
         hotkey_rx: Receiver<HotkeyEvent>,
         language: Option<String>,
+        model_downloader: Arc<ModelDownloader>,
     ) -> eframe::Result<()> {
         let viewport = egui::ViewportBuilder::default()
             .with_decorations(false)
@@ -535,6 +585,7 @@ impl CaptionerGUI {
             transcription_rx,
             hotkey_rx,
             language,
+            model_downloader,
         );
 
         eframe::run_native(

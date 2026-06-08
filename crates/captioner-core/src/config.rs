@@ -128,6 +128,7 @@ pub enum AppCommand {
     SetModel(String),
     SetLanguage(Option<String>),
     SetRecordingScale(f32),
+    DownloadModel(String),
     Clear,
     Quit,
     IncreaseFontSize,
@@ -443,8 +444,14 @@ backend: Option<String>,
 #[arg(long, help = "Compute device for Python backend (cpu, cuda, auto)")]
 python_device: Option<String>,
 
-#[arg(long, help = "Generate default config.toml and exit")]
-generate_config: bool,
+    #[arg(long, help = "Generate default config.toml and exit")]
+    generate_config: bool,
+
+    #[arg(long, help = "Download a whisper model (e.g. --download-model base)")]
+    download_model: Option<String>,
+
+    #[arg(long, help = "List available and downloadable models")]
+    list_models: bool,
 }
 
 pub fn parse_args() -> Config {
@@ -452,6 +459,39 @@ pub fn parse_args() -> Config {
 
     if cli.generate_config {
         generate_default_config();
+        std::process::exit(0);
+    }
+
+    if cli.list_models {
+        crate::download::print_downloadable_models();
+        std::process::exit(0);
+    }
+
+    if let Some(model) = cli.download_model {
+        let downloader = crate::download::ModelDownloader::new();
+        info!("Downloading model '{}'...", model);
+        downloader.download(&model);
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let (dl, total) = downloader.progress();
+            if total > 0 {
+                let pct = (dl as f64 / total as f64 * 100.0) as u64;
+                eprint!("\r  Downloaded {} / {} MB ({}%)    ",
+                    dl / 1_048_576, total / 1_048_576, pct);
+            }
+            match downloader.status() {
+                crate::download::DownloadStatus::Completed { .. } => {
+                    println!("\nDone!");
+                    std::process::exit(0);
+                }
+                crate::download::DownloadStatus::Failed { error, .. } => {
+                    println!("\nFailed: {}", error);
+                    std::process::exit(1);
+                }
+                crate::download::DownloadStatus::Idle => break,
+                _ => {}
+            }
+        }
         std::process::exit(0);
     }
 
