@@ -38,9 +38,9 @@ fn main() -> anyhow::Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     info!("Captioner starting...");
-    info!("Config: model={}, language={:?}, gui={}, web={}, web_port={}, hotkey={}, backend={}, input={:?}, output={:?}",
-        config.model_name, config.language, config.gui, config.web, config.web_port, config.hotkey,
-        config.transcription_backend, config.input_device, config.output_device);
+    info!("Config: model={}, language={:?}, gui={}, web={}, web_port={}, hotkey={}, backend={}, gpu={}, input={:?}, output={:?}",
+    config.model_name, config.language, config.gui, config.web, config.web_port, config.hotkey,
+    config.transcription_backend, config.use_gpu, config.input_device, config.output_device);
 
     if config.input_device.is_none() && config.output_device.is_none() {
         captioner_core::audio::print_audio_devices();
@@ -423,7 +423,10 @@ fn spawn_command_handler(
                                 }
                             }
                 AppCommand::SetRecordingScale(s) => {
-                    info!("Recording scale change requested: {} (not yet implemented)", s);
+                    match handle.set_recording_scale(s) {
+                        Ok(()) => info!("Recording scale change requested: {}", s),
+                        Err(e) => error!("Failed to send recording scale request: {}", e),
+                    }
                 }
                 AppCommand::DownloadModel(m) => {
                     info!("Model download requested: {}", m);

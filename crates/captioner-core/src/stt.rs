@@ -12,6 +12,7 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContextParameters, Whisper
 pub enum SttCommand {
     SetModel(String),
     SetLanguage(Option<String>),
+    SetRecordingScale(f32),
 }
 
 #[derive(Clone)]
@@ -43,6 +44,10 @@ impl SttHandle {
 
     pub fn set_language(&self, language: Option<String>) -> Result<(), mpsc::error::TrySendError<SttCommand>> {
         self.command_tx.try_send(SttCommand::SetLanguage(language))
+    }
+
+    pub fn set_recording_scale(&self, scale: f32) -> Result<(), mpsc::error::TrySendError<SttCommand>> {
+        self.command_tx.try_send(SttCommand::SetRecordingScale(scale))
     }
 }
 
@@ -106,29 +111,29 @@ impl SttEngine {
             )));
         }
 
-        let mut params = WhisperContextParameters::new();
-        params.use_gpu = false;
+    let mut params = WhisperContextParameters::new();
+    params.use_gpu = self.config.use_gpu;
 
-        let ctx = WhisperContext::new_with_params(&model_path, params)
-            .map_err(|e| CaptionerError::Whisper(format!("Failed to load model: {:?}", e)))?;
+    let ctx = WhisperContext::new_with_params(&model_path, params)
+        .map_err(|e| CaptionerError::Whisper(format!("Failed to load model: {:?}", e)))?;
 
-        info!("Whisper model loaded: {}", self.config.model_name);
-        self.ctx = Some(ctx);
-        Ok(())
+    info!("Whisper model loaded: {} (gpu={})", self.config.model_name, self.config.use_gpu);
+    self.ctx = Some(ctx);
+    Ok(())
+}
+
+fn reload_model(&mut self, model_name: &str) -> Result<(), CaptionerError> {
+    let model_path = get_model_path(model_name);
+
+    if !model_path.exists() {
+        return Err(CaptionerError::Whisper(format!(
+            "Model file not found: {}. Download it first.",
+            model_path.display()
+        )));
     }
 
-    fn reload_model(&mut self, model_name: &str) -> Result<(), CaptionerError> {
-        let model_path = get_model_path(model_name);
-
-        if !model_path.exists() {
-            return Err(CaptionerError::Whisper(format!(
-                "Model file not found: {}. Download it first.",
-                model_path.display()
-            )));
-        }
-
-        let mut params = WhisperContextParameters::new();
-        params.use_gpu = false;
+    let mut params = WhisperContextParameters::new();
+    params.use_gpu = self.config.use_gpu;
 
         let ctx = WhisperContext::new_with_params(&model_path, params)
             .map_err(|e| CaptionerError::Whisper(format!("Failed to load model: {:?}", e)))?;
@@ -214,10 +219,14 @@ impl SttEngine {
                                     }
                                 }
                             }
-                            SttCommand::SetLanguage(lang) => {
-                                self.config.language = lang;
-                                info!("Language updated (in stub mode)");
-                            }
+                SttCommand::SetLanguage(lang) => {
+                    self.config.language = lang;
+                    info!("Language updated (in stub mode)");
+                }
+                SttCommand::SetRecordingScale(scale) => {
+                    self.config.recording_scale = scale.max(0.1);
+                    info!("Recording scale updated to {} (in stub mode)", self.config.recording_scale);
+                }
                         }
                     }
                 }
@@ -228,16 +237,18 @@ impl SttEngine {
             }
         }
 
-        info!("STT engine running with model: {}", self.config.model_name);
+    info!("STT engine running with model: {}", self.config.model_name);
 
-        let mut vad = VoiceActivityDetector::new(self.config.webrtc_sensitivity);
-        let mut recording_buffer: Vec<f32> = Vec::with_capacity(MAX_BUFFER_SAMPLES);
-        let mut silence_chunks = 0usize;
-        let mut is_recording_segment = false;
+    let mut vad = VoiceActivityDetector::new(self.config.webrtc_sensitivity);
+    let mut recording_buffer: Vec<f32> = Vec::with_capacity(MAX_BUFFER_SAMPLES);
+    let mut silence_chunks = 0usize;
+    let mut is_recording_segment = false;
+    let mut recording_scale = self.config.recording_scale;
 
         loop {
-            if self.stop_flag.load(Ordering::SeqCst) {
-                if is_recording_segment && recording_buffer.len() >= MIN_RECORDING_SAMPLES {
+        if self.stop_flag.load(Ordering::SeqCst) {
+            let mr = ((MIN_RECORDING_SAMPLES as f32 / recording_scale) as usize).max(1600);
+            if is_recording_segment && recording_buffer.len() >= mr {
                     self.flush_transcription(&mut recording_buffer);
                 }
                 break;
@@ -245,11 +256,13 @@ impl SttEngine {
 
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                    if is_recording_segment {
-                        silence_chunks += 1;
-                        if silence_chunks >= SILENCE_CHUNKS_THRESHOLD
-                            && recording_buffer.len() >= MIN_RECORDING_SAMPLES
-                        {
+            if is_recording_segment {
+                silence_chunks += 1;
+                let st = ((SILENCE_CHUNKS_THRESHOLD as f32 / recording_scale) as usize).max(1);
+                let mr = ((MIN_RECORDING_SAMPLES as f32 / recording_scale) as usize).max(1600);
+                if silence_chunks >= st
+                    && recording_buffer.len() >= mr
+                {
                             debug!("Silence timeout, transcribing {} samples", recording_buffer.len());
                             self.flush_transcription(&mut recording_buffer);
                             is_recording_segment = false;
@@ -273,32 +286,37 @@ impl SttEngine {
                         silence_chunks += 1;
                     }
 
-                    if recording_buffer.len() >= MAX_BUFFER_SAMPLES {
-                        debug!("Buffer full (60s), transcribing {} samples", recording_buffer.len());
-                        self.flush_transcription(&mut recording_buffer);
-                        is_recording_segment = false;
-                        silence_chunks = 0;
+            if recording_buffer.len() >= MAX_BUFFER_SAMPLES {
+                debug!("Buffer full (60s), transcribing {} samples", recording_buffer.len());
+                self.flush_transcription(&mut recording_buffer);
+                is_recording_segment = false;
+                silence_chunks = 0;
+            }
+        }
+        Some(cmd) = self.command_rx.recv() => {
+            let mr = ((MIN_RECORDING_SAMPLES as f32 / recording_scale) as usize).max(1600);
+            if is_recording_segment && recording_buffer.len() >= mr {
+                self.flush_transcription(&mut recording_buffer);
+                is_recording_segment = false;
+                silence_chunks = 0;
+            }
+            match cmd {
+                SttCommand::SetModel(model_name) => {
+                    match self.reload_model(&model_name) {
+                        Ok(()) => info!("Switched to model: {}", model_name),
+                        Err(e) => error!("Failed to switch model to '{}': {}", model_name, e),
                     }
                 }
-                Some(cmd) = self.command_rx.recv() => {
-                    if is_recording_segment && recording_buffer.len() >= MIN_RECORDING_SAMPLES {
-                        self.flush_transcription(&mut recording_buffer);
-                        is_recording_segment = false;
-                        silence_chunks = 0;
-                    }
-                    match cmd {
-                        SttCommand::SetModel(model_name) => {
-                            match self.reload_model(&model_name) {
-                                Ok(()) => info!("Switched to model: {}", model_name),
-                                Err(e) => error!("Failed to switch model to '{}': {}", model_name, e),
-                            }
-                        }
-                        SttCommand::SetLanguage(lang) => {
-                            self.config.language = lang;
-                            info!("Language changed to: {:?}", self.config.language);
-                        }
-                    }
+                SttCommand::SetLanguage(lang) => {
+                    self.config.language = lang;
+                    info!("Language changed to: {:?}", self.config.language);
                 }
+                SttCommand::SetRecordingScale(scale) => {
+                    recording_scale = scale.max(0.1);
+                    info!("Recording scale changed to: {}", recording_scale);
+                }
+            }
+        }
             }
         }
 

@@ -1,8 +1,7 @@
 use crossbeam_channel::Receiver;
 use eframe::egui::{
-    Area, Color32, DragValue, FontId, Frame, Key,
-    Order, Pos2, Rect, RichText, ScrollArea,
-    Stroke, Vec2,
+    Area, Color32, DragValue, FontId, Frame, Key, Order, Pos2, Rect, RichText, ScrollArea, Stroke,
+    Vec2,
 };
 use eframe::{egui, App, NativeOptions};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,21 +9,26 @@ use std::sync::Arc;
 use tracing::debug;
 
 use captioner_core::{
-    AppCommand, HotkeyEvent, TranscriptionResult,
-    ModelDownloader, DownloadStatus,
+    AppCommand, DownloadStatus, HotkeyEvent, ModelDownloader, TranscriptionResult,
 };
 
 pub struct DuplicateDetector;
 
 impl DuplicateDetector {
-    pub fn new(_threshold: f32, _recent_count: usize) -> Self { Self }
+    pub fn new(_threshold: f32, _recent_count: usize) -> Self {
+        Self
+    }
     pub fn add_line(&mut self, _line: &str) {}
-    pub fn is_duplicate(&self, _text: &str) -> bool { false }
+    pub fn is_duplicate(&self, _text: &str) -> bool {
+        false
+    }
     pub fn clear(&mut self) {}
 }
 
 impl Default for DuplicateDetector {
-    fn default() -> Self { Self }
+    fn default() -> Self {
+        Self
+    }
 }
 
 pub fn process_text_with_furigana(text: &str) -> String {
@@ -32,8 +36,17 @@ pub fn process_text_with_furigana(text: &str) -> String {
 }
 
 const MODEL_OPTIONS: [&str; 11] = [
-    "tiny", "base", "small", "medium", "large", "large-v2", "large-v3",
-    "tiny.en", "base.en", "small.en", "medium.en",
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large",
+    "large-v2",
+    "large-v3",
+    "tiny.en",
+    "base.en",
+    "small.en",
+    "medium.en",
 ];
 
 pub struct CaptionerGUI {
@@ -63,6 +76,7 @@ pub struct CaptionerGUI {
     show_toolbar: bool,
     hovered_toolbar: bool,
     model_downloader: Arc<ModelDownloader>,
+    recording_scale: f32,
 }
 
 impl CaptionerGUI {
@@ -101,6 +115,7 @@ impl CaptionerGUI {
             show_toolbar: false,
             hovered_toolbar: false,
             model_downloader,
+            recording_scale: 1.25,
         }
     }
 
@@ -238,7 +253,13 @@ impl App for CaptionerGUI {
         let input = ctx.input(|i| {
             let mut events = Vec::new();
             for e in &i.events {
-                if let egui::Event::Key { key, pressed, modifiers, .. } = e {
+                if let egui::Event::Key {
+                    key,
+                    pressed,
+                    modifiers,
+                    ..
+                } = e
+                {
                     if *pressed {
                         events.push((*key, *modifiers));
                     }
@@ -308,26 +329,37 @@ impl App for CaptionerGUI {
         let frame_rect = if self.fullscreen || (self.fullwidth && self.fullheight) {
             Rect::from_min_size(Pos2::ZERO, screen_size)
         } else if self.fullwidth {
-            Rect::from_min_size(Pos2::new(0.0, self.pos_y), Vec2::new(screen_size.x, self.window_height))
+            Rect::from_min_size(
+                Pos2::new(0.0, self.pos_y),
+                Vec2::new(screen_size.x, self.window_height),
+            )
         } else if self.fullheight {
-            Rect::from_min_size(Pos2::new(self.pos_x, 0.0), Vec2::new(self.window_width, screen_size.y))
+            Rect::from_min_size(
+                Pos2::new(self.pos_x, 0.0),
+                Vec2::new(self.window_width, screen_size.y),
+            )
         } else {
-            Rect::from_min_size(Pos2::new(self.pos_x, self.pos_y), Vec2::new(self.window_width, self.window_height))
+            Rect::from_min_size(
+                Pos2::new(self.pos_x, self.pos_y),
+                Vec2::new(self.window_width, self.window_height),
+            )
         };
 
         let mouse_pos = ctx.input(|i| i.pointer.hover_pos());
         let toolbar_zone_top = frame_rect.min.y + 40.0;
-        self.show_toolbar = mouse_pos.is_some_and(|p| p.y < toolbar_zone_top && p.x >= frame_rect.min.x && p.x <= frame_rect.max.x);
+        self.show_toolbar = mouse_pos.is_some_and(|p| {
+            p.y < toolbar_zone_top && p.x >= frame_rect.min.x && p.x <= frame_rect.max.x
+        });
         self.hovered_toolbar = self.show_toolbar;
 
         Area::new(egui::Id::new("captioner_overlay"))
-        .fixed_pos(frame_rect.min)
-        .order(Order::Foreground)
-        .show(ctx, |ui| {
-            let bg_alpha = self.alpha.max(40);
-            Frame::none()
-            .fill(Color32::from_rgba_unmultiplied(0, 0, 0, bg_alpha))
-            .show(ui, |ui| {
+            .fixed_pos(frame_rect.min)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                let bg_alpha = self.alpha.max(40);
+                Frame::none()
+                    .fill(Color32::from_rgba_unmultiplied(0, 0, 0, bg_alpha))
+                    .show(ui, |ui| {
                         ui.set_min_size(frame_rect.size());
 
                         if self.show_toolbar {
@@ -346,9 +378,7 @@ impl App for CaptionerGUI {
                                 }
 
                                 scroll_ui.label(
-                                    RichText::new(&text)
-                                        .color(Color32::WHITE)
-                                        .font(font_id),
+                                    RichText::new(&text).color(Color32::WHITE).font(font_id),
                                 );
                             });
 
@@ -393,8 +423,15 @@ impl CaptionerGUI {
                     } else {
                         Color32::from_rgb(180, 50, 50)
                     };
-                    let rec_text = if self.recording_enabled { "\u{2B24} REC" } else { "\u{25CB} PAUSED" };
-                    if row.button(RichText::new(rec_text).color(rec_color).size(13.0)).clicked() {
+                    let rec_text = if self.recording_enabled {
+                        "\u{2B24} REC"
+                    } else {
+                        "\u{25CB} PAUSED"
+                    };
+                    if row
+                        .button(RichText::new(rec_text).color(rec_color).size(13.0))
+                        .clicked()
+                    {
                         self.recording_enabled = !self.recording_enabled;
                         let _ = self.command_tx.send(AppCommand::ToggleRecording);
                     }
@@ -410,7 +447,11 @@ impl CaptionerGUI {
 
                     row.separator();
 
-                    row.label(RichText::new("Model:").size(12.0).color(Color32::from_rgb(180, 180, 180)));
+                    row.label(
+                        RichText::new("Model:")
+                            .size(12.0)
+                            .color(Color32::from_rgb(180, 180, 180)),
+                    );
                     let model_combo = egui::ComboBox::from_id_salt("toolbar_model")
                         .width(90.0)
                         .selected_text(MODEL_OPTIONS[self.model_index]);
@@ -419,16 +460,23 @@ impl CaptionerGUI {
                             cb_ui.selectable_value(&mut self.model_index, i, *model);
                         }
                     });
-                    if MODEL_OPTIONS.get(self.model_index).copied() != Some(self.current_model.as_str()) {
+                    if MODEL_OPTIONS.get(self.model_index).copied()
+                        != Some(self.current_model.as_str())
+                    {
                         if let Some(&new_model) = MODEL_OPTIONS.get(self.model_index) {
                             self.current_model = new_model.to_string();
-                            let _ = self.command_tx.send(AppCommand::SetModel(new_model.to_string()));
+                            let _ = self
+                                .command_tx
+                                .send(AppCommand::SetModel(new_model.to_string()));
                         }
                     }
 
                     row.separator();
 
-                    if row.button(RichText::new("\u{2699} Settings").size(13.0)).clicked() {
+                    if row
+                        .button(RichText::new("\u{2699} Settings").size(13.0))
+                        .clicked()
+                    {
                         self.show_settings = !self.show_settings;
                     }
 
@@ -485,6 +533,11 @@ impl CaptionerGUI {
         ui.horizontal(|row_ui| {
             row_ui.label("Font Size:");
             row_ui.add(DragValue::new(&mut font_size).range(10.0..=200.0).speed(1.0));
+        });
+
+        ui.horizontal(|row_ui| {
+            row_ui.label("Rec Scale:");
+            row_ui.add(DragValue::new(&mut self.recording_scale).range(0.1..=5.0).speed(0.05));
         });
 
         ui.separator();
@@ -549,6 +602,7 @@ impl CaptionerGUI {
                                     let _ = self.command_tx.send(AppCommand::SetModel(new_model.to_string()));
                                 }
                                 let _ = self.command_tx.send(AppCommand::SetLanguage(new_lang));
+            let _ = self.command_tx.send(AppCommand::SetRecordingScale(self.recording_scale));
                             }
                             if btn_ui.button("Cancel").clicked() {
                                 self.show_settings = false;
@@ -588,10 +642,6 @@ impl CaptionerGUI {
             model_downloader,
         );
 
-        eframe::run_native(
-            "Captioner",
-            options,
-            Box::new(|_cc| Ok(Box::new(app))),
-        )
+        eframe::run_native("Captioner", options, Box::new(|_cc| Ok(Box::new(app))))
     }
 }

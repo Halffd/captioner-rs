@@ -7,8 +7,17 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 pub const MODEL_NAMES: &[&str] = &[
-    "tiny", "base", "small", "medium", "large", "large-v2", "large-v3",
-    "tiny.en", "base.en", "small.en", "medium.en",
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large",
+    "large-v2",
+    "large-v3",
+    "tiny.en",
+    "base.en",
+    "small.en",
+    "medium.en",
     "jlondonobo/whisper-medium-pt",
     "clu-ling/whisper-large-v2-japanese-5k-steps",
     "distil-whisper/distil-medium.en",
@@ -49,6 +58,7 @@ pub struct Config {
     pub history: Option<usize>,
     pub transcription_backend: TranscriptionBackend,
     pub python_device: Option<String>,
+    pub use_gpu: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -93,10 +103,11 @@ impl Default for Config {
             min_gap_between_recordings: 0.4,
             list_devices: false,
             history: None,
-        transcription_backend: TranscriptionBackend::WhisperCpp,
-        python_device: None,
+            transcription_backend: TranscriptionBackend::WhisperCpp,
+            python_device: None,
+            use_gpu: false,
+        }
     }
-}
 }
 
 impl Config {
@@ -219,6 +230,7 @@ struct TomlConfig {
     default_model: Option<String>,
     transcription_backend: Option<TranscriptionBackend>,
     python_device: Option<String>,
+    use_gpu: Option<bool>,
 }
 
 fn load_toml_config() -> TomlConfig {
@@ -267,7 +279,8 @@ pub fn scan_available_models() -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir(&models_dir) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("ggml-") && (name.ends_with(".bin") || name.ends_with(".ggml")) {
+                if name.starts_with("ggml-") && (name.ends_with(".bin") || name.ends_with(".ggml"))
+                {
                     let model_name = name
                         .strip_prefix("ggml-")
                         .unwrap_or(name)
@@ -417,7 +430,11 @@ struct Cli {
     #[arg(short = 'o', long, help = "Audio output device for monitor capture")]
     output: Option<String>,
 
-    #[arg(long = "list-devices", short = 'l', help = "List audio devices and exit")]
+    #[arg(
+        long = "list-devices",
+        short = 'l',
+        help = "List audio devices and exit"
+    )]
     list_devices: bool,
 
     #[arg(long = "no-realtime", help = "Disable realtime transcription")]
@@ -438,11 +455,11 @@ struct Cli {
     #[arg(long, help = "Show history of past N log sessions")]
     history: Option<usize>,
 
-#[arg(long, help = "Transcription backend: whisper-cpp, python, or stub")]
-backend: Option<String>,
+    #[arg(long, help = "Transcription backend: whisper-cpp, python, or stub")]
+    backend: Option<String>,
 
-#[arg(long, help = "Compute device for Python backend (cpu, cuda, auto)")]
-python_device: Option<String>,
+    #[arg(long, help = "Compute device for Python backend (cpu, cuda, auto)")]
+    python_device: Option<String>,
 
     #[arg(long, help = "Generate default config.toml and exit")]
     generate_config: bool,
@@ -452,6 +469,9 @@ python_device: Option<String>,
 
     #[arg(long, help = "List available and downloadable models")]
     list_models: bool,
+
+    #[arg(long, help = "Enable GPU acceleration (requires CUDA)")]
+    gpu: bool,
 }
 
 pub fn parse_args() -> Config {
@@ -476,8 +496,12 @@ pub fn parse_args() -> Config {
             let (dl, total) = downloader.progress();
             if total > 0 {
                 let pct = (dl as f64 / total as f64 * 100.0) as u64;
-                eprint!("\r  Downloaded {} / {} MB ({}%)    ",
-                    dl / 1_048_576, total / 1_048_576, pct);
+                eprint!(
+                    "\r  Downloaded {} / {} MB ({}%)    ",
+                    dl / 1_048_576,
+                    total / 1_048_576,
+                    pct
+                );
             }
             match downloader.status() {
                 crate::download::DownloadStatus::Completed { .. } => {
@@ -504,7 +528,8 @@ pub fn parse_args() -> Config {
     let data_dir = ensure_data_dirs();
 
     let cli_model = cli.model.take();
-    let default_model = cli_model.as_deref()
+    let default_model = cli_model
+        .as_deref()
         .or(toml_cfg.default_model.as_deref())
         .or(toml_cfg.model.as_deref())
         .unwrap_or("base");
@@ -536,11 +561,21 @@ pub fn parse_args() -> Config {
             if a.starts_with('-') {
                 match a.as_str() {
                     "-g" | "--gui" | "-w" | "--web" | "--no-gui" | "--no-web" | "--no-hotkey"
-                    | "--debug" | "--test" | "--list-devices" | "-ld" | "-nrt" | "--no-realtime"
-                    | "--generate-config" => {}
-                "-i" | "--input" | "-o" | "--output" | "--silero-sensitivity"
-                | "--webrtc-sensitivity" | "--min-gap" | "--recording-scale"
-                | "--web-port" | "--history" | "--backend" | "--python-device" => {
+                    | "--debug" | "--test" | "--list-devices" | "-ld" | "-nrt"
+                    | "--no-realtime" | "--generate-config" => {}
+                    "-i"
+                    | "--input"
+                    | "-o"
+                    | "--output"
+                    | "--silero-sensitivity"
+                    | "--webrtc-sensitivity"
+                    | "--min-gap"
+                    | "--recording-scale"
+                    | "--web-port"
+                    | "--history"
+                    | "--backend"
+                    | "--python-device"
+                    | "--gpu" => {
                         i += 1;
                     }
                     _ => {}
@@ -585,15 +620,41 @@ pub fn parse_args() -> Config {
         }
     }
 
-    let gui = if cli.no_gui { false } else { cli.gui || toml_cfg.gui.unwrap_or(false) };
-    let web = if cli.no_web { false } else { cli.web || toml_cfg.web.unwrap_or(false) };
-    let hotkey = if cli.no_hotkey { false } else { toml_cfg.hotkey.unwrap_or(true) };
+    let gui = if cli.no_gui {
+        false
+    } else {
+        cli.gui || toml_cfg.gui.unwrap_or(false)
+    };
+    let web = if cli.no_web {
+        false
+    } else {
+        cli.web || toml_cfg.web.unwrap_or(false)
+    };
+    let hotkey = if cli.no_hotkey {
+        false
+    } else {
+        toml_cfg.hotkey.unwrap_or(true)
+    };
 
-    let web_port = if cli.web_port != 0 { cli.web_port } else { toml_cfg.web_port.unwrap_or(5000) };
+    let web_port = if cli.web_port != 0 {
+        cli.web_port
+    } else {
+        toml_cfg.web_port.unwrap_or(5000)
+    };
 
-    let toml_backend_str = toml_cfg.transcription_backend.as_ref().map(|b| b.to_string()).unwrap_or_default();
-    let backend = cli.backend.as_deref()
-        .or(if toml_backend_str.is_empty() { None } else { Some(toml_backend_str.as_str()) })
+    let toml_backend_str = toml_cfg
+        .transcription_backend
+        .as_ref()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    let backend = cli
+        .backend
+        .as_deref()
+        .or(if toml_backend_str.is_empty() {
+            None
+        } else {
+            Some(toml_backend_str.as_str())
+        })
         .unwrap_or("whisper-cpp");
     let transcription_backend = match backend {
         "python" => TranscriptionBackend::Python,
@@ -621,14 +682,24 @@ pub fn parse_args() -> Config {
         path,
         input_device: cli.input.or(toml_cfg.input_device),
         output_device: cli.output.or(toml_cfg.output_device),
-        recording_scale: cli.recording_scale.or(toml_cfg.recording_scale).unwrap_or(1.25),
-        silero_sensitivity: cli.silero_sensitivity.or(toml_cfg.silero_sensitivity).unwrap_or(0.1),
-        webrtc_sensitivity: cli.webrtc_sensitivity.or(toml_cfg.webrtc_sensitivity).unwrap_or(0),
+        recording_scale: cli
+            .recording_scale
+            .or(toml_cfg.recording_scale)
+            .unwrap_or(1.25),
+        silero_sensitivity: cli
+            .silero_sensitivity
+            .or(toml_cfg.silero_sensitivity)
+            .unwrap_or(0.1),
+        webrtc_sensitivity: cli
+            .webrtc_sensitivity
+            .or(toml_cfg.webrtc_sensitivity)
+            .unwrap_or(0),
         min_gap_between_recordings: cli.min_gap.or(toml_cfg.min_gap).unwrap_or(0.4),
         list_devices: cli.list_devices,
         history: None,
         transcription_backend,
         python_device: cli.python_device.or(toml_cfg.python_device),
+        use_gpu: cli.gpu || toml_cfg.use_gpu.unwrap_or(false),
     }
 }
 
@@ -721,6 +792,9 @@ hotkey = true
 
 # Compute device for Python backend (cpu, cuda, auto)
 # python_device = "cpu"
+
+# Enable GPU acceleration for whisper.cpp (requires CUDA build)
+# use_gpu = false
 "#;
 
     match std::fs::write(&config_path, toml_str) {
